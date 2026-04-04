@@ -7,7 +7,8 @@
 // =====================================
 
 // ============= Commands ==============
-// GPS:Name:X:Y:Z:|Faceup,Faceforward : sets target position and orientation mode
+// GPS:Name:X:Y:Z:|Ux,Uy,Uz,Fx,Fy,Fz : sets target position and explicit up/forward vectors
+// GPS:Name:X:Y:Z:|Faceup,Faceforward : auto derive up/forward vectors
 // stop : disables autopilot and releases controls
 // start : enables autopilot (if a target has been set)
 // clear : clears target and releases controls
@@ -89,7 +90,7 @@ void WriteEcho()
     else
         sb.AppendLine("Target: <none>");
     sb.AppendLine("Command example:");
-    sb.AppendLine("GPS:Site:66288.47:-8270.96:-94039.68:|Faceup,Faceforward");
+    sb.AppendLine("GPS:Site:66288.47:-8270.96:-94039.68:|-0.4942,-0.5045,0.7079,0.5018,0.4994,0.7063");
     sb.AppendLine("dumpgps");
     sb.AppendLine("Faceforward = look toward target");
     sb.AppendLine("Faceup = align up to gravity-up (or current up in space)");
@@ -186,9 +187,7 @@ void DumpCurrentGpsToCustomData()
     sb.AppendLine();
     sb.AppendLine();
     sb.AppendLine("[AutopilotDump]");
-    sb.AppendLine($"GPS:Here:{p.X:0.00}:{p.Y:0.00}:{p.Z:0.00}:|Faceup,Faceforward");
-    sb.AppendLine($"Faceforward:{f.X:0.0000},{f.Y:0.0000},{f.Z:0.0000}");
-    sb.AppendLine($"Faceup:{u.X:0.0000},{u.Y:0.0000},{u.Z:0.0000}");
+    sb.AppendLine($"GPS:Here:{p.X:0.00}:{p.Y:0.00}:{p.Z:0.00}:|{u.X:0.0000},{u.Y:0.0000},{u.Z:0.0000},{f.X:0.0000},{f.Y:0.0000},{f.Z:0.0000}");
 
     Me.CustomData = sb.ToString();
     Echo("Dumped GPS/orientation to Custom Data.");
@@ -219,6 +218,26 @@ bool TryParseGpsCommand(string command, out Vector3D gps, out Vector3D forward, 
     if (parts.Length > 1)
     {
         string[] modes = parts[1].Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
+        if (modes.Length == 6)
+        {
+            double ux, uy, uz, fx, fy, fz;
+            if (double.TryParse(modes[0].Trim(), out ux) &&
+                double.TryParse(modes[1].Trim(), out uy) &&
+                double.TryParse(modes[2].Trim(), out uz) &&
+                double.TryParse(modes[3].Trim(), out fx) &&
+                double.TryParse(modes[4].Trim(), out fy) &&
+                double.TryParse(modes[5].Trim(), out fz))
+            {
+                up = new Vector3D(ux, uy, uz);
+                forward = new Vector3D(fx, fy, fz);
+                if (up.LengthSquared() > 0.001)
+                    up = Vector3D.Normalize(up);
+                if (forward.LengthSquared() > 0.001)
+                    forward = Vector3D.Normalize(forward);
+                return true;
+            }
+        }
+
         Vector3D toTarget = gps - rc.GetPosition();
         foreach (string rawMode in modes)
         {
