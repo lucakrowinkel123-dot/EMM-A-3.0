@@ -1,5 +1,5 @@
 
-// Follower Script Version 1.2
+// Autopilot Test Script
 
 // ============= Settings ==============
 // Settings are located entirely in Custom Data.
@@ -7,50 +7,32 @@
 // =====================================
 
 // ============= Commands ==============
-// setoffset;x;y;z : sets the offset variable to this value
-// addoffset;x;y;z : adds these values to the current offset
-// stop : stops the script and releases control to you
-// start : starts the script after a stop command
-// starthere : starts the script in the current position
-// clear : forces the script to forget a previous leader when calculateMissingTicks is true
-// reset : loads the current configuration, or the first offset
-// save(;name) : saves the configuration to the current offset
-// savehere(;name) : saves the configuration to the current position
-// load;name : loads the offset from the configuration
+// GPS:Name:X:Y:Z:|Ux,Uy,Uz,Fx,Fy,Fz : sets target position and explicit up/forward vectors
+// GPS:Name:X:Y:Z:|Faceup,Faceforward : auto derive up/forward vectors
+// stop : disables autopilot and releases controls
+// start : enables autopilot (if a target has been set)
+// clear : clears target and releases controls
+// dumpgps : appends current GPS + orientation snapshot to Custom Data
 // =====================================
 
-StorageData storage;
 Settings settings;
 
 IMyShipController rc;
 ThrusterControl thrust;
 GyroControl gyros;
-List<IMyCameraBlock> cameras = new List<IMyCameraBlock>();
-Vector3D? obstacleOffset = null;
-MatrixD leaderMatrix = MatrixD.Zero;
-Vector3D leaderVelocity;
-Random r = new Random();
-IMyBroadcastListener leaderListener;
-IMyBroadcastListener commandListener;
-readonly string transmitTag = "FSLeader";
-readonly string transmitCommandTag = "FSCommand";
+Vector3D targetPosition = Vector3D.Zero;
+bool hasTarget = false;
+bool autopilotEnabled = false;
+Vector3D desiredForward = Vector3D.Zero;
+Vector3D desiredUp = Vector3D.Zero;
 
 readonly int echoFrequency = 100; // every 100th game tick
 int runtime = 0;
-int updated = 0;
-
-bool prevControl = false;
 
 public Program ()
 {
     settings = new Settings(Me);
     settings.Load();
-
-    storage = new StorageData(this);
-    storage.Load();
-
-    transmitTag += settings.followerSystemId.Value;
-    transmitCommandTag += settings.followerSystemId.Value;
 
     // Prioritize the given cockpit name
     rc = GetBlock<IMyShipController>(settings.cockpitName.Value, true);
@@ -64,22 +46,13 @@ public Program ()
     thrust = new ThrusterControl(rc, settings.tickSpeed.Value, GetBlocks<IMyThrust>());
     gyros = new GyroControl(rc, settings.tickSpeed.Value, GetBlocks<IMyGyro>());
 
-    if (settings.enableCollisionAvoidence.Value)
-        cameras = GetBlocks<IMyCameraBlock>();
-
     if (settings.tickSpeed.Value == UpdateFrequency.Update10)
         echoFrequency = 10;
     else if (settings.tickSpeed.Value == UpdateFrequency.Update100)
         echoFrequency = 1;
 
-    leaderListener = IGC.RegisterBroadcastListener(transmitTag);
-    leaderListener.SetMessageCallback("");
-    commandListener = IGC.RegisterBroadcastListener(transmitCommandTag);
-    commandListener.SetMessageCallback("");
-
     Echo("Ready.");
-    if (!storage.IsDisabled)
-        Runtime.UpdateFrequency = settings.tickSpeed.Value;
+    Runtime.UpdateFrequency = settings.tickSpeed.Value;
 }
 
 void ResetMovement()
@@ -95,90 +68,11 @@ public void Main (string argument, UpdateType updateSource)
         if (runtime % echoFrequency == 0)
             WriteEcho();
 
-        // Check to make sure that a message from the leader has been received
-        if (leaderMatrix == MatrixD.Zero)
-        {
-            runtime++;
-            return;
-        }
-
-        if (settings.autoStop.Value)
-        {
-            bool control = rc.IsUnderControl;
-            if (control != prevControl)
-            {
-                if (control)
-                    ResetMovement();
-                else if (settings.autoStartHere.Value)
-                    storage.Offset = CurrentOffset();
-
-                prevControl = control;
-            }
-
-            if (prevControl)
-            {
-                runtime++;
-                return;
-            }
-        }
-
-        Move();
+        if (autopilotEnabled && hasTarget)
+            Move();
+        else
+            ResetMovement();
         runtime++;
-    }
-    else if (updateSource == UpdateType.IGC)
-    {
-        if (leaderListener.HasPendingMessage)
-        {
-            var data = leaderListener.AcceptMessage().Data;
-            if (data is MyTuple<MatrixD, Vector3D, long>)
-            {
-                MyTuple<MatrixD, Vector3D, long> msg = (MyTuple<MatrixD, Vector3D, long>)data;
-                if (msg.Item3 != Me.CubeGrid.EntityId)
-                {
-                    leaderMatrix = msg.Item1;
-                    leaderVelocity = msg.Item2;
-                    updated = runtime;
-                }
-                else
-                {
-                    leaderMatrix = MatrixD.Zero;
-                }
-            }
-            else if (data is MyTuple<MatrixD, Vector3D>)
-            {
-                MyTuple<MatrixD, Vector3D> msg = (MyTuple<MatrixD, Vector3D>)data;
-                leaderMatrix = msg.Item1;
-                leaderVelocity = msg.Item2;
-                updated = runtime;
-            }
-        }
-
-        if (commandListener.HasPendingMessage)
-        {
-            var data = commandListener.AcceptMessage().Data;
-            if (data is MyTuple<string, string>)
-            {
-                MyTuple<string, string> msg = (MyTuple<string, string>)data;
-
-                if (msg.Item1.Length > 0)
-                {
-                    foreach (string s in msg.Item1.Split(';'))
-                    {
-                        if (s == settings.followerId.Value)
-                        {
-                            RemoteCommand(msg.Item2);
-                            return;
-                        }
-                    }
-                    return;
-                }
-                else
-                {
-                    RemoteCommand(msg.Item2);
-                    return;
-                }
-            }
-        }
     }
     else
     {
@@ -189,32 +83,17 @@ public void Main (string argument, UpdateType updateSource)
 void WriteEcho()
 {
     StringBuilder sb = new StringBuilder();
-    sb.AppendLine("Running.");
-    sb.Append(settings.followerSystemId).Append('.').Append(settings.followerId).AppendLine();
-    Vector3D offset = storage.Offset;
-    sb.AppendLine(offset.ToString("0.00"));
-    if (offset == Vector3D.Zero)
-    {
-        sb.AppendLine("Offset is zero,");
-        sb.AppendLine("Use commands to give the offset a value.");
-    }
-    if (leaderMatrix == MatrixD.Zero)
-        sb.AppendLine("No messages received.");
-    else if (settings.calculateMissingTicks.Value && runtime - updated > settings.maxMissingScriptTicks.Value)
-        sb.AppendLine($"Weak signal, message received {runtime - updated} ticks ago.");
-    if (settings.autoStop.Value && prevControl)
-        sb.AppendLine("Cockpit is under control.");
-    if (obstacleOffset.HasValue)
-        sb.AppendLine("Obstacle Detected! Stopping the ship.");
-    sb.AppendLine();
-    sb.AppendLine("Configs:");
-    foreach (string s in settings.configs.Value.Keys)
-    {
-        sb.Append(' ').Append(s);
-        if (s == storage.CurrentConfig)
-            sb.Append('*');
-        sb.AppendLine();
-    }
+    sb.AppendLine("Autopilot Test Mode");
+    sb.AppendLine(autopilotEnabled ? "State: Enabled" : "State: Disabled");
+    if (hasTarget)
+        sb.AppendLine($"Target: {targetPosition.ToString("0.00")}");
+    else
+        sb.AppendLine("Target: <none>");
+    sb.AppendLine("Command example:");
+    sb.AppendLine("GPS:Site:66288.47:-8270.96:-94039.68:|-0.4942,-0.5045,0.7079,0.5018,0.4994,0.7063");
+    sb.AppendLine("dumpgps");
+    sb.AppendLine("Faceforward = look toward target");
+    sb.AppendLine("Faceup = align up to gravity-up (or current up in space)");
 
     Echo(sb.ToString());
 }
@@ -222,233 +101,163 @@ void WriteEcho()
 
 void Move ()
 {
-    gyros.FaceVectors(leaderMatrix.Forward, leaderMatrix.Up);
-
-    Vector3D offset = storage.Offset;
-    if (offset == Vector3D.Zero)
+    Vector3D position = rc.GetPosition();
+    Vector3D toTarget = targetPosition - position;
+    if (toTarget.LengthSquared() < 4)
     {
-        thrust.ApplyAccel(thrust.ControlVelocity(leaderVelocity));
+        thrust.Reset();
+        gyros.Reset();
         return;
     }
 
-    // Apply translations to find the world position that this follower is supposed to be
-    Vector3D targetPosition = Vector3D.Transform(offset, leaderMatrix);
+    Vector3D forward = desiredForward;
+    if (forward == Vector3D.Zero && toTarget.LengthSquared() > 0.001)
+        forward = Vector3D.Normalize(toTarget);
 
-    if (settings.calculateMissingTicks.Value)
+    Vector3D up = desiredUp;
+    if (up == Vector3D.Zero)
     {
-        int diff = Math.Min(Math.Abs(runtime - updated), settings.maxMissingScriptTicks.Value);
-        if (diff > 0)
-        {
-            double secPerTick = 1.0 / 60;
-            if (settings.tickSpeed.Value == UpdateFrequency.Update10)
-                secPerTick = 1.0 / 6;
-            else if (settings.tickSpeed.Value == UpdateFrequency.Update100)
-                secPerTick = 5.0 / 3;
-            double secPassed = diff * secPerTick;
-            targetPosition += leaderVelocity * secPassed;
-        }
+        Vector3D gravity = rc.GetNaturalGravity();
+        if (gravity.LengthSquared() > 0.001)
+            up = Vector3D.Normalize(-gravity);
+        else
+            up = rc.WorldMatrix.Up;
     }
 
-    if (settings.enableCollisionAvoidence.Value)
-    {
-        CheckForCollistions(targetPosition);
-        if (obstacleOffset.HasValue)
-        {
-            thrust.ApplyAccel(thrust.ControlPosition(Vector3D.Transform(obstacleOffset.Value, leaderMatrix), leaderVelocity, settings.maxSpeed.Value));
-            return;
-        }
-    }
-
-    thrust.ApplyAccel(thrust.ControlPosition(targetPosition, leaderVelocity, settings.maxSpeed.Value));
+    gyros.FaceVectors(forward, up);
+    thrust.ApplyAccel(thrust.ControlPosition(targetPosition, Vector3D.Zero, settings.maxSpeed.Value));
 }
 
 void RemoteCommand (string command)
 {
-    string [] args = command.Split(';');
+    if (string.IsNullOrWhiteSpace(command))
+        return;
 
-    switch (args [0])
+    string trimmed = command.Trim();
+    if (trimmed.StartsWith("GPS:", StringComparison.OrdinalIgnoreCase))
     {
-        case "setoffset": // setoffset;x;y;z
-            if (args.Length == 4)
-            {
-                Vector3D offset = storage.Offset;
-                double temp;
-                if (!string.IsNullOrWhiteSpace(args[1]) && double.TryParse(args[1], out temp))
-                    offset.X = temp;
-                if (!string.IsNullOrWhiteSpace(args[2]) && double.TryParse(args[2], out temp))
-                    offset.Y = temp;
-                if (!string.IsNullOrWhiteSpace(args[3]) && double.TryParse(args[3], out temp))
-                    offset.Z = temp;
+        if (!TryParseGpsCommand(trimmed, out targetPosition, out desiredForward, out desiredUp))
+        {
+            Echo("Invalid GPS command format.");
+            return;
+        }
+        hasTarget = true;
+        autopilotEnabled = true;
+        WriteEcho();
+        return;
+    }
 
-                storage.Offset = offset;
-                WriteEcho();
-            }
-            else
-            {
-                return;
-            }
-            break;
-        case "addoffset": // addoffset;x;y;z
-            if (args.Length == 4)
-            {
-                Vector3D offset = new Vector3D();
-                double temp;
-                if (!string.IsNullOrWhiteSpace(args[1]) && double.TryParse(args[1], out temp))
-                    offset.X = temp;
-                if (!string.IsNullOrWhiteSpace(args[2]) && double.TryParse(args[2], out temp))
-                    offset.Y = temp;
-                if (!string.IsNullOrWhiteSpace(args[3]) && double.TryParse(args[3], out temp))
-                    offset.Z = temp;
-
-                storage.Offset += offset;
-                WriteEcho();
-            }
-            else
-            {
-                return;
-            }
-            break;
-        case "stop": // stop
+    switch (trimmed.ToLower())
+    {
+        case "stop":
             Runtime.UpdateFrequency = UpdateFrequency.None;
             ResetMovement();
-            storage.IsDisabled = true;
+            autopilotEnabled = false;
             Echo("Stopped.");
             break;
-        case "start": // start
+        case "start":
             Runtime.UpdateFrequency = settings.tickSpeed.Value;
-            storage.IsDisabled = false;
+            autopilotEnabled = true;
             WriteEcho();
-            break;
-        case "starthere": // starthere
-            Runtime.UpdateFrequency = settings.tickSpeed.Value;
-            storage.AutoSave = false;
-            storage.Offset = CurrentOffset();
-            storage.IsDisabled = false;
-            storage.Save();
-            WriteEcho();
-            break;
-        case "reset": // reset
-            {
-                Vector3D newOffset;
-                if (!settings.configs.Value.TryGetValue(storage.CurrentConfig, out newOffset))
-                    newOffset = settings.configs.Value.First().Value;
-                storage.Offset = newOffset;
-                WriteEcho();
-            }
-            break;
-        case "save": // save(;name)
-            {
-                string key = storage.CurrentConfig;
-                if (args.Length > 1)
-                    key = args [1];
-
-                if (key.Contains(' '))
-                    return;
-
-                settings.configs.Value [key] = storage.Offset;
-                settings.Save();
-            }
-            break;
-        case "savehere": // save(;name)
-            {
-                string key = storage.CurrentConfig;
-                if (args.Length > 1)
-                    key = args [1];
-
-                if (key.Contains(' '))
-                    return;
-
-                Vector3D newOffset = CurrentOffset();
-                settings.configs.Value [key] = newOffset;
-                settings.Save();
-            }
-            break;
-        case "load": // load;name
-            {
-                Vector3D newOffset;
-                if (args.Length == 1 || !settings.configs.Value.TryGetValue(args[1], out newOffset))
-                    return;
-                // Load the new config
-                storage.AutoSave = false;
-                storage.Offset = newOffset;
-                storage.CurrentConfig = args [1];
-                storage.IsDisabled = false;
-                storage.Save();
-                WriteEcho();
-            }
             break;
         case "clear":
-            leaderMatrix = MatrixD.Zero;
+            hasTarget = false;
+            desiredForward = Vector3D.Zero;
+            desiredUp = Vector3D.Zero;
+            ResetMovement();
+            WriteEcho();
+            break;
+        case "dumpgps":
+            DumpCurrentGpsToCustomData();
             break;
     }
 }
 
-Vector3D CurrentOffset ()
+void DumpCurrentGpsToCustomData()
 {
-    return Vector3D.TransformNormal(rc.GetPosition() - leaderMatrix.Translation, MatrixD.Transpose(rc.WorldMatrix));
+    Vector3D p = rc.GetPosition();
+    Vector3D f = Vector3D.Normalize(rc.WorldMatrix.Forward);
+    Vector3D u = Vector3D.Normalize(rc.WorldMatrix.Up);
+
+    StringBuilder sb = new StringBuilder();
+    string existing = Me.CustomData ?? "";
+    if (!string.IsNullOrWhiteSpace(existing))
+        sb.Append(existing.TrimEnd());
+
+    sb.AppendLine();
+    sb.AppendLine();
+    sb.AppendLine("[AutopilotDump]");
+    sb.AppendLine($"GPS:Here:{p.X:0.00}:{p.Y:0.00}:{p.Z:0.00}:|{u.X:0.0000},{u.Y:0.0000},{u.Z:0.0000},{f.X:0.0000},{f.Y:0.0000},{f.Z:0.0000}");
+
+    Me.CustomData = sb.ToString();
+    Echo("Dumped GPS/orientation to Custom Data.");
 }
 
-bool StringToVector (string x, string y, string z, out Vector3D output)
+bool TryParseGpsCommand(string command, out Vector3D gps, out Vector3D forward, out Vector3D up)
 {
-    try
-    {
-        double x2 = double.Parse(x);
-        double y2 = double.Parse(y);
-        double z2 = double.Parse(z);
-        output = new Vector3D(x2, y2, z2);
-        return true;
-    }
-    catch (Exception)
-    {
-        output = new Vector3D();
+    gps = Vector3D.Zero;
+    forward = Vector3D.Zero;
+    up = Vector3D.Zero;
+
+    string[] parts = command.Split('|');
+    string gpsPart = parts[0];
+    string[] gpsTokens = gpsPart.Split(':');
+    if (gpsTokens.Length < 5)
         return false;
-    }
-}
 
-void CheckForCollistions (Vector3D target)
-{
-    double resultDist;
-    if (!Raycast(target, out resultDist))
+    double x, y, z;
+    if (!double.TryParse(gpsTokens[2], out x))
+        return false;
+    if (!double.TryParse(gpsTokens[3], out y))
+        return false;
+    if (!double.TryParse(gpsTokens[4], out z))
+        return false;
+
+    gps = new Vector3D(x, y, z);
+
+    if (parts.Length > 1)
     {
-        return;
-    }
-
-    if (double.IsInfinity(resultDist))
-    {
-        obstacleOffset = null;
-        return;
-    }
-
-    obstacleOffset = CurrentOffset();
-}
-
-bool Raycast (Vector3D target, out double hitDistance)
-{
-    bool raycasted = false;
-    hitDistance = double.PositiveInfinity;
-    foreach (IMyCameraBlock c in cameras)
-    {
-        c.Enabled = true;
-        c.EnableRaycast = true;
-        if (c.CanScan(target))
+        string[] modes = parts[1].Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
+        if (modes.Length == 6)
         {
-            raycasted = true;
-            MyDetectedEntityInfo info = c.Raycast(target);
-            if (info.HitPosition.HasValue)
+            double ux, uy, uz, fx, fy, fz;
+            if (double.TryParse(modes[0].Trim(), out ux) &&
+                double.TryParse(modes[1].Trim(), out uy) &&
+                double.TryParse(modes[2].Trim(), out uz) &&
+                double.TryParse(modes[3].Trim(), out fx) &&
+                double.TryParse(modes[4].Trim(), out fy) &&
+                double.TryParse(modes[5].Trim(), out fz))
             {
-                if (info.EntityId == Me.CubeGrid.EntityId)
-                    continue;
+                up = new Vector3D(ux, uy, uz);
+                forward = new Vector3D(fx, fy, fz);
+                if (up.LengthSquared() > 0.001)
+                    up = Vector3D.Normalize(up);
+                if (forward.LengthSquared() > 0.001)
+                    forward = Vector3D.Normalize(forward);
+                return true;
+            }
+        }
 
-                double dist = Vector3D.Distance(c.GetPosition(), info.HitPosition.Value);
-                if (dist < hitDistance && dist > 0.1)
-                {
-                    hitDistance = dist;
-                }
-
+        Vector3D toTarget = gps - rc.GetPosition();
+        foreach (string rawMode in modes)
+        {
+            string mode = rawMode.Trim().ToLower();
+            if (mode == "faceforward")
+            {
+                if (toTarget.LengthSquared() > 0.001)
+                    forward = Vector3D.Normalize(toTarget);
+            }
+            else if (mode == "faceup")
+            {
+                Vector3D gravity = rc.GetNaturalGravity();
+                if (gravity.LengthSquared() > 0.001)
+                    up = Vector3D.Normalize(-gravity);
+                else
+                    up = rc.WorldMatrix.Up;
             }
         }
     }
-    return raycasted;
+    return true;
 }
 
 T GetBlock<T> (string name, bool useSubgrids = false) where T : class, IMyTerminalBlock
@@ -994,54 +803,20 @@ public class Settings
 {
     private readonly IMyProgrammableBlock Me;
     private readonly MyIni ini = new MyIni();
-    private const string section = "FormationSystem-Follower";
+    private const string section = "Autopilot";
     private bool init = false;
 
-    public IniValueString followerSystemId = new IniValueString(section, "followerSystemId", "System1",
-        "\n The id that the ship should listen to." +
-        "\n All commands not prefixed by this will be ignored.");
-    public IniValueString followerId = new IniValueString(section, "followerId", "Drone1");
-    public IniValueConfigs configs = new IniValueConfigs(section, "configs",
-        "\n Configurations:" +
-        "\n Use this to store a list of offsets. There must be at least one config." +
-        "\n You can use commands to edit this or you can edit directly and" +
-        "\n recompile. Each line stores an offset and a tag for that offset." +
-        "\n Format: \"|Name X Y Z\"" +
-        "\n X: +Right -Left" +
-        "\n Y: +Up -Down" +
-        "\n Z: +Backward -Forward");
-    public IniValueBool enableCollisionAvoidence = new IniValueBool(section, "enableCollisionAvoidence", false,
-        "\n When enabled, the script will attempt to avoid collisions by stopping" +
-        "\n when there is something between itself and its designated position." +
-        "\n This is a CPU intensive process!");
     public IniValueString cockpitName = new IniValueString(section, "cockpitName", "Cockpit",
         "\n The name of the cockpit in the ship.If this cockpit is not" +
         "\n found, the script will attempt to find one on its own.");
-    public IniValueBool autoStop = new IniValueBool(section, "autoStop", true,
-        "\n When true, the script will not run if there is a player" +
-        "\n in the designated cockpit.");
-    public IniValueBool autoStartHere = new IniValueBool(section, "autoStartHere", false,
-        "\n When true, upon leaving the cockpit, the script will set the offset to" +
-        "\n the current position instead of returning to its designated point." +
-        "\n This is equivalent to the starthere command.");
     public IniValueDouble maxSpeed = new IniValueDouble(section, "maxSpeed", 20,
-        "\n The maximum speed that the ship can go to correct itself." +
-        "\n This is relative to the current speed of the leader ship.");
+        "\n The maximum speed the ship can use when correcting to a GPS target.");
     public IniValueEnum<UpdateFrequency> tickSpeed = new IniValueEnum<UpdateFrequency>(section, "tickSpeed", UpdateFrequency.Update1,
-        "\n This is the frequency that the scirpt is running at. If you are" +
+        "\n This is the frequency that the script is running at. If you are" +
         "\n experiencing lag because of this script, try decreasing this value." +
         "\n Update1 : Runs the script every tick" +
         "\n Update10 : Runs the script every 10th tick" +
         "\n Update100 : Runs the script every 100th tick");
-    public IniValueBool calculateMissingTicks = new IniValueBool(section, "calculateMissingTicks", true,
-        "\n When the tick speed of the leader is lower than the tick speed of" +
-        "\n the follower, this workaround can be activated. When this is enabled," +
-        "\n the script will \"guess\" what the leader position should be.");
-    public IniValueInt maxMissingScriptTicks = new IniValueInt(section, "maxMissingScriptTicks", 100,
-        "\n When calculateMissingTicks is enabled, the maximum number of ticks" +
-        "\n to estimate before assuming the leader is no longer active." +
-        "\n 1 game tick = 1/60 seconds");
-
 
     public Settings (IMyProgrammableBlock me)
     {
@@ -1058,17 +833,9 @@ public class Settings
 
             if (ini.ContainsSection(section))
             {
-                followerSystemId.Load(ini);
-                followerId.Load(ini);
-                configs.Load(ini);
-                enableCollisionAvoidence.Load(ini);
                 cockpitName.Load(ini);
-                autoStop.Load(ini);
-                autoStartHere.Load(ini);
                 maxSpeed.Load(ini);
                 tickSpeed.Load(ini);
-                calculateMissingTicks.Load(ini);
-                maxMissingScriptTicks.Load(ini);
                 init = true;
                 return;
             }
@@ -1091,194 +858,15 @@ public class Settings
 
     private void SaveAll()
     {
-        followerSystemId.Save(ini);
-        followerId.Save(ini);
-        configs.Save(ini);
-        enableCollisionAvoidence.Save(ini);
         cockpitName.Save(ini);
-        autoStop.Save(ini);
-        autoStartHere.Save(ini);
         maxSpeed.Save(ini);
         tickSpeed.Save(ini);
-        calculateMissingTicks.Save(ini);
-        maxMissingScriptTicks.Save(ini);
         ini.SetSectionComment(section,
-            " Formation System - Follower Script Version 1.2" +
+            " GPS Autopilot Test Script" +
             "\n If you edit this configuration manually, you must recompile the" +
             "\n script afterwards or you could lose the changes.");
         Me.CustomData = ini.ToString();
     }
-
-    public class IniValueConfigs : IniValue<Dictionary<string, Vector3D>>
-    {
-        public IniValueConfigs (string section, string key, string comment = null) : base(section, key, null, comment)
-        {
-            value = new Dictionary<string, Vector3D>();
-            value ["default"] = new Vector3D(50, 0, 0);
-        }
-
-        protected override void Set (MyIni ini)
-        {
-            StringBuilder sb = new StringBuilder();
-            foreach (KeyValuePair<string, Vector3D> kv in value)
-            {
-                sb.Append(kv.Key);
-                sb.Append(' ');
-                sb.Append(kv.Value.X);
-                sb.Append(' ');
-                sb.Append(kv.Value.Y);
-                sb.Append(' ');
-                sb.Append(kv.Value.Z);
-                sb.Append('\n');
-            }
-            if(value.Count > 1)
-                sb.Length--;
-            ini.Set(key, sb.ToString());
-        }
-
-        protected override bool TryGetValue (MyIniValue storage, out Dictionary<string, Vector3D> value)
-        {
-            value = new Dictionary<string, Vector3D>();
-            List<string> lines = new List<string>();
-            storage.GetLines(lines);
-            foreach(string l in lines)
-            {
-                if (string.IsNullOrWhiteSpace(l))
-                    continue;
-                string [] configValues = l.Split(new [] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
-                if (configValues.Length != 4)
-                    return false;
-                Vector3D offset = new Vector3D();
-                if (!double.TryParse(configValues [1], out offset.X))
-                    return false;
-                if (!double.TryParse(configValues [2], out offset.Y))
-                    return false;
-                if (!double.TryParse(configValues [3], out offset.Z))
-                    return false;
-                value[configValues [0]] = offset;
-            }
-            return value.Count > 0;
-        }
-    }
-}
-
-public class StorageData
-{
-    private readonly Program prg;
-    private readonly StringBuilder sb = new StringBuilder();
-
-    public StorageData(Program prg)
-    {
-        this.prg = prg;
-    }
-
-    private Vector3D offset = new Vector3D();
-    public Vector3D Offset
-    {
-        get
-        {
-            return offset;
-        }
-        set
-        {
-            offset = value;
-            if (AutoSave)
-                Save();
-        }
-    }
-
-    private bool isDisabled = false;
-    public bool IsDisabled
-    {
-        get
-        {
-            return isDisabled;
-        }
-        set
-        {
-            if (isDisabled != value)
-            {
-                isDisabled = value;
-                if (AutoSave)
-                    Save();
-            }
-        }
-    }
-
-    private string currentConfig = "default";
-    public string CurrentConfig
-    {
-        get
-        {
-            return currentConfig;
-        }
-        set
-        {
-            currentConfig = value;
-            if (AutoSave)
-                Save();
-        }
-    }
-
-    public bool AutoSave { get; set; } = true;
-
-    public void Save()
-    {
-        // isDisabled;currentConfig;x;y;z
-        if (isDisabled)
-            sb.Append("1;");
-        else
-            sb.Append("0;");
-        sb.Append(currentConfig);
-        sb.Append(';');
-        sb.Append(offset.X);
-        sb.Append(';');
-        sb.Append(offset.Y);
-        sb.Append(';');
-        sb.Append(offset.Z);
-        prg.Storage = sb.ToString();
-        sb.Clear();
-        AutoSave = true;
-    }
-
-    public void Load()
-    {
-        string storage = prg.Storage;
-        Settings settings = prg.settings;
-
-        if (string.IsNullOrWhiteSpace(prg.Storage))
-        {
-            Save();
-            if (!settings.configs.Value.ContainsKey(currentConfig))
-                currentConfig = settings.configs.Value.First().Key;
-            return;
-        }
-
-        try
-        {
-            // Parse Storage values
-            string[] args = prg.Storage.Split(';');
-            bool loadedIsDisabled = args[0] == "1";
-            string loadedCurrentConfig = args[1];
-            Vector3D loadedOffset = new Vector3D(
-                double.Parse(args[2]),
-                double.Parse(args[3]),
-                double.Parse(args[4])
-                );
-
-            if (settings.configs.Value.ContainsKey(loadedCurrentConfig))
-                currentConfig = loadedCurrentConfig;
-            else
-                currentConfig = settings.configs.Value.First().Key;
-            offset = loadedOffset;
-            isDisabled = loadedIsDisabled;
-        }
-        catch (Exception)
-        {
-            Save();
-        }
-    }
-
 }
 
 
