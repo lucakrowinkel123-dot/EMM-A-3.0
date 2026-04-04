@@ -26,7 +26,6 @@ Vector3D desiredUp = Vector3D.Zero;
 
 readonly int echoFrequency = 100; // every 100th game tick
 int runtime = 0;
-int updated = 0;
 
 public Program ()
 {
