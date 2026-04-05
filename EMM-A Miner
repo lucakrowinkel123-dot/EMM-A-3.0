@@ -222,6 +222,8 @@ void RemoteCommand (string command)
         WriteEcho();
         return;
     }
+    return true;
+}
 
     if (trimmed.StartsWith("SPEEDF ", StringComparison.OrdinalIgnoreCase))
     {
