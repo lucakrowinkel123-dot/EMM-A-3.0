@@ -127,19 +127,19 @@ void WriteEcho()
     sb.AppendLine("Autopilot Test Mode");
     sb.AppendLine(autopilotEnabled ? "State: Enabled" : "State: Disabled");
     if (hasTarget)
-        sb.AppendLine($"Target: {targetPosition.ToString("0.00")}");
+        sb.AppendLine("Target: " + targetPosition.ToString("0.00"));
     else
         sb.AppendLine("Target: <none>");
     sb.AppendLine("Command example:");
     sb.AppendLine("GPS:Site:66288.47:-8270.96:-94039.68:|-0.4942,-0.5045,0.7079,0.5018,0.4994,0.7063");
     sb.AppendLine("dumpgps");
-    sb.AppendLine($"Arrival tolerance: {settings.arrivalTolerance.Value:0.00} m");
-    sb.AppendLine($"Orientation tolerance: {settings.orientationToleranceDeg.Value:0.00} deg");
-    sb.AppendLine($"Mining: {miningState}");
-    sb.AppendLine($"SPEEDF: {SPEEDF:0.00} m/s");
-    sb.AppendLine($"SPEEDB: {SPEEDB:0.00} m/s");
-    sb.AppendLine($"MW/MH/OV: {MW:0.00}/{MH:0.00}/{OV:0.00} m");
-    sb.AppendLine($"Anchors planned: {laneAnchors.Count}");
+    sb.AppendLine("Arrival tolerance: " + settings.arrivalTolerance.Value.ToString("0.00") + " m");
+    sb.AppendLine("Orientation tolerance: " + settings.orientationToleranceDeg.Value.ToString("0.00") + " deg");
+    sb.AppendLine("Mining: " + miningState);
+    sb.AppendLine("SPEEDF: " + SPEEDF.ToString("0.00") + " m/s");
+    sb.AppendLine("SPEEDB: " + SPEEDB.ToString("0.00") + " m/s");
+    sb.AppendLine("MW/MH/OV: " + MW.ToString("0.00") + "/" + MH.ToString("0.00") + "/" + OV.ToString("0.00") + " m");
+    sb.AppendLine("Anchors planned: " + laneAnchors.Count);
     sb.AppendLine("Faceforward = look toward target");
     sb.AppendLine("Faceup = align up to gravity-up (or current up in space)");
 
@@ -232,7 +232,7 @@ void RemoteCommand (string command)
         if (double.TryParse(trimmed.Substring(7).Trim(), out v) && v > 0)
         {
             SPEEDF = v;
-            Echo($"SPEEDF set to {SPEEDF:0.00} m/s");
+            Echo("SPEEDF set to " + SPEEDF.ToString("0.00") + " m/s");
         }
         else
             Echo("Invalid SPEEDF value.");
@@ -245,7 +245,7 @@ void RemoteCommand (string command)
         if (double.TryParse(trimmed.Substring(7).Trim(), out v) && v > 0)
         {
             SPEEDB = v;
-            Echo($"SPEEDB set to {SPEEDB:0.00} m/s");
+            Echo("SPEEDB set to " + SPEEDB.ToString("0.00") + " m/s");
         }
         else
             Echo("Invalid SPEEDB value.");
@@ -259,7 +259,7 @@ void RemoteCommand (string command)
         {
             MW = v;
             RebuildAnchorsIfReady();
-            Echo($"MW set to {MW:0.00} m");
+            Echo("MW set to " + MW.ToString("0.00") + " m");
         }
         else
             Echo("Invalid SET_MW value.");
@@ -272,7 +272,7 @@ void RemoteCommand (string command)
         {
             MH = v;
             RebuildAnchorsIfReady();
-            Echo($"MH set to {MH:0.00} m");
+            Echo("MH set to " + MH.ToString("0.00") + " m");
         }
         else
             Echo("Invalid SET_MH value.");
@@ -285,7 +285,7 @@ void RemoteCommand (string command)
         {
             OV = v;
             RebuildAnchorsIfReady();
-            Echo($"OV set to {OV:0.00} m");
+            Echo("OV set to " + OV.ToString("0.00") + " m");
         }
         else
             Echo("Invalid SET_OV value.");
@@ -383,7 +383,7 @@ void StartSingleLaneMining(string command)
     autopilotEnabled = true;
     miningEnabled = true;
     miningState = MiningState.EnterLane;
-    Echo($"Mining lane started. Depth={laneDepth:0.00}m");
+    Echo("Mining lane started. Depth=" + laneDepth.ToString("0.00") + "m");
 }
 
 void UpdateMiningState()
@@ -419,7 +419,7 @@ void UpdateMiningState()
                     laneAnchorIndex++;
                     laneAnchor = laneAnchors[laneAnchorIndex];
                     miningState = MiningState.EnterLane;
-                    Echo($"Moving to next anchor ({laneAnchorIndex + 1}/{laneAnchors.Count})");
+                    Echo("Moving to next anchor (" + (laneAnchorIndex + 1) + "/" + laneAnchors.Count + ")");
                 }
                 else
                 {
@@ -570,7 +570,7 @@ void BuildAnchorPlan()
         }
     }
 
-    Echo($"Anchor plan built. Total anchors: {laneAnchors.Count}");
+    Echo("Anchor plan built. Total anchors: " + laneAnchors.Count);
 }
 
 Vector3D RejectFromNormal(Vector3D v, Vector3D normal)
@@ -615,7 +615,8 @@ void DumpCurrentGpsToCustomData()
     sb.AppendLine();
     sb.AppendLine();
     sb.AppendLine("[AutopilotDump]");
-    sb.AppendLine($"GPS:Here:{p.X:0.00}:{p.Y:0.00}:{p.Z:0.00}:|{u.X:0.0000},{u.Y:0.0000},{u.Z:0.0000},{f.X:0.0000},{f.Y:0.0000},{f.Z:0.0000}");
+    sb.AppendLine(string.Format("GPS:Here:{0:0.00}:{1:0.00}:{2:0.00}:|{3:0.0000},{4:0.0000},{5:0.0000},{6:0.0000},{7:0.0000},{8:0.0000}",
+        p.X, p.Y, p.Z, u.X, u.Y, u.Z, f.X, f.Y, f.Z));
 
     Me.CustomData = sb.ToString();
     Echo("Dumped GPS/orientation to Custom Data.");
@@ -1007,7 +1008,7 @@ public class IniValueVector3D : IniValue<Vector3D>
     public IniValueVector3D (string section, string key, Vector3D defaultValue = default(Vector3D), string comment = null) : base(section, key, defaultValue, comment) { }
     protected override void Set (MyIni ini)
     {
-        ini.Set(key, $"{value.X} {value.Y} {value.Z}");
+        ini.Set(key, value.X + " " + value.Y + " " + value.Z);
     }
     protected override bool TryGetValue (MyIniValue storage, out Vector3D value)
     {
