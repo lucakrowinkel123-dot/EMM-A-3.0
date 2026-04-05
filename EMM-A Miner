@@ -13,6 +13,8 @@
 // start : enables autopilot (if a target has been set)
 // clear : clears target and releases controls
 // dumpgps : appends current GPS + orientation snapshot to Custom Data
+// minelane;depth : run one mining lane from anchor to depth and return
+// cancelmine : stops mining state machine and turns drills off
 // =====================================
 
 Settings settings;
@@ -20,11 +22,25 @@ Settings settings;
 IMyShipController rc;
 ThrusterControl thrust;
 GyroControl gyros;
+List<IMyShipDrill> drills = new List<IMyShipDrill>();
 Vector3D targetPosition = Vector3D.Zero;
 bool hasTarget = false;
 bool autopilotEnabled = false;
 Vector3D desiredForward = Vector3D.Zero;
 Vector3D desiredUp = Vector3D.Zero;
+
+enum MiningState
+{
+    Idle,
+    EnterLane,
+    DrillForward,
+    Backout
+}
+MiningState miningState = MiningState.Idle;
+bool miningEnabled = false;
+Vector3D laneAnchor = Vector3D.Zero;
+Vector3D drillAxis = Vector3D.Zero;
+double laneDepth = 0;
 
 readonly int echoFrequency = 100; // every 100th game tick
 int runtime = 0;
@@ -45,6 +61,7 @@ public Program ()
 
     thrust = new ThrusterControl(rc, settings.tickSpeed.Value, GetBlocks<IMyThrust>());
     gyros = new GyroControl(rc, settings.tickSpeed.Value, GetBlocks<IMyGyro>());
+    drills = GetBlocks<IMyShipDrill>();
 
     if (settings.tickSpeed.Value == UpdateFrequency.Update10)
         echoFrequency = 10;
@@ -67,6 +84,9 @@ public void Main (string argument, UpdateType updateSource)
     {
         if (runtime % echoFrequency == 0)
             WriteEcho();
+
+        if (miningEnabled)
+            UpdateMiningState();
 
         if (autopilotEnabled && hasTarget)
             Move();
@@ -94,6 +114,7 @@ void WriteEcho()
     sb.AppendLine("dumpgps");
     sb.AppendLine($"Arrival tolerance: {settings.arrivalTolerance.Value:0.00} m");
     sb.AppendLine($"Orientation tolerance: {settings.orientationToleranceDeg.Value:0.00} deg");
+    sb.AppendLine($"Mining: {miningState}");
     sb.AppendLine("Faceforward = look toward target");
     sb.AppendLine("Faceup = align up to gravity-up (or current up in space)");
 
@@ -193,12 +214,119 @@ void RemoteCommand (string command)
             hasTarget = false;
             desiredForward = Vector3D.Zero;
             desiredUp = Vector3D.Zero;
+            miningEnabled = false;
+            miningState = MiningState.Idle;
+            SetDrills(false);
             ResetMovement();
             WriteEcho();
             break;
         case "dumpgps":
             DumpCurrentGpsToCustomData();
             break;
+        case "cancelmine":
+            miningEnabled = false;
+            miningState = MiningState.Idle;
+            SetDrills(false);
+            Echo("Mining cancelled.");
+            break;
+        default:
+            if (trimmed.StartsWith("minelane;", StringComparison.OrdinalIgnoreCase))
+                StartSingleLaneMining(trimmed);
+            break;
+    }
+}
+
+void StartSingleLaneMining(string command)
+{
+    string[] args = command.Split(';');
+    if (args.Length < 2)
+    {
+        Echo("Usage: minelane;depth");
+        return;
+    }
+
+    double depth;
+    if (!double.TryParse(args[1], out depth) || depth <= 0)
+    {
+        Echo("Invalid depth.");
+        return;
+    }
+
+    laneDepth = depth;
+    laneAnchor = hasTarget ? targetPosition : rc.GetPosition();
+
+    Vector3D fwd = desiredForward;
+    if (fwd.LengthSquared() < 0.001)
+        fwd = rc.WorldMatrix.Forward;
+    drillAxis = Vector3D.Normalize(fwd);
+
+    if (desiredUp.LengthSquared() < 0.001)
+    {
+        Vector3D gravity = rc.GetNaturalGravity();
+        desiredUp = gravity.LengthSquared() > 0.001 ? Vector3D.Normalize(-gravity) : rc.WorldMatrix.Up;
+    }
+
+    desiredForward = drillAxis;
+    targetPosition = laneAnchor;
+    hasTarget = true;
+    autopilotEnabled = true;
+    miningEnabled = true;
+    miningState = MiningState.EnterLane;
+    Echo($"Mining lane started. Depth={laneDepth:0.00}m");
+}
+
+void UpdateMiningState()
+{
+    switch (miningState)
+    {
+        case MiningState.EnterLane:
+            targetPosition = laneAnchor;
+            desiredForward = drillAxis;
+            if (IsAtTargetPose(targetPosition, desiredForward, desiredUp))
+            {
+                SetDrills(true);
+                miningState = MiningState.DrillForward;
+            }
+            break;
+        case MiningState.DrillForward:
+            targetPosition = laneAnchor + drillAxis * laneDepth;
+            desiredForward = drillAxis;
+            if (IsAtTargetPosition(targetPosition))
+                miningState = MiningState.Backout;
+            break;
+        case MiningState.Backout:
+            targetPosition = laneAnchor;
+            desiredForward = drillAxis;
+            if (IsAtTargetPosition(targetPosition))
+            {
+                SetDrills(false);
+                miningEnabled = false;
+                miningState = MiningState.Idle;
+                autopilotEnabled = false;
+                Echo("Mining lane complete.");
+            }
+            break;
+    }
+}
+
+bool IsAtTargetPosition(Vector3D target)
+{
+    double tolerance = Math.Max(0.05, settings.arrivalTolerance.Value);
+    return Vector3D.DistanceSquared(rc.GetPosition(), target) < tolerance * tolerance;
+}
+
+bool IsAtTargetPose(Vector3D target, Vector3D forward, Vector3D up)
+{
+    return IsAtTargetPosition(target) && IsOrientationAligned(forward, up, settings.orientationToleranceDeg.Value);
+}
+
+void SetDrills(bool enabled)
+{
+    foreach (var d in drills)
+    {
+        if (d == null || !d.IsFunctional)
+            continue;
+        d.Enabled = enabled;
     }
 }
 
