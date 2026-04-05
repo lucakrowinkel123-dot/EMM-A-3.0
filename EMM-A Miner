@@ -17,6 +17,10 @@
 // cancelmine : stops mining state machine and turns drills off
 // SPEEDF <value> : sets forward drilling speed (m/s)
 // SPEEDB <value> : sets backing-out speed (m/s)
+// SET_CORNERS <gpsA>,<gpsB>,<gpsStartSide> : configure mining plane
+// SET_MW <meters> : set miner width (for lane spacing)
+// SET_MH <meters> : set miner height (for row spacing)
+// SET_OV <meters> : set overlap
 // =====================================
 
 Settings settings;
@@ -46,6 +50,18 @@ double laneDepth = 0;
 double SPEEDF = 1.0; // forward drilling speed (m/s)
 double SPEEDB = 6.0; // backing-out speed (m/s)
 double activeMaxSpeed = 0;
+double MW = 5.0; // miner width in meters
+double MH = 5.0; // miner height in meters
+double OV = 0.5; // overlap in meters
+
+bool hasCornerA = false;
+bool hasCornerB = false;
+bool hasStartSide = false;
+Vector3D cornerA = Vector3D.Zero;
+Vector3D cornerB = Vector3D.Zero;
+Vector3D startSide = Vector3D.Zero;
+List<Vector3D> laneAnchors = new List<Vector3D>();
+int laneAnchorIndex = 0;
 
 readonly int echoFrequency = 100; // every 100th game tick
 int runtime = 0;
@@ -122,6 +138,8 @@ void WriteEcho()
     sb.AppendLine($"Mining: {miningState}");
     sb.AppendLine($"SPEEDF: {SPEEDF:0.00} m/s");
     sb.AppendLine($"SPEEDB: {SPEEDB:0.00} m/s");
+    sb.AppendLine($"MW/MH/OV: {MW:0.00}/{MH:0.00}/{OV:0.00} m");
+    sb.AppendLine($"Anchors planned: {laneAnchors.Count}");
     sb.AppendLine("Faceforward = look toward target");
     sb.AppendLine("Faceup = align up to gravity-up (or current up in space)");
 
@@ -204,6 +222,8 @@ void RemoteCommand (string command)
         WriteEcho();
         return;
     }
+    return true;
+}
 
     if (trimmed.StartsWith("SPEEDF ", StringComparison.OrdinalIgnoreCase))
     {
@@ -228,6 +248,51 @@ void RemoteCommand (string command)
         }
         else
             Echo("Invalid SPEEDB value.");
+        return;
+    }
+
+    if (trimmed.StartsWith("SET_MW ", StringComparison.OrdinalIgnoreCase))
+    {
+        double v;
+        if (double.TryParse(trimmed.Substring(7).Trim(), out v) && v > 0)
+        {
+            MW = v;
+            RebuildAnchorsIfReady();
+            Echo($"MW set to {MW:0.00} m");
+        }
+        else
+            Echo("Invalid SET_MW value.");
+        return;
+    }
+    if (trimmed.StartsWith("SET_MH ", StringComparison.OrdinalIgnoreCase))
+    {
+        double v;
+        if (double.TryParse(trimmed.Substring(7).Trim(), out v) && v > 0)
+        {
+            MH = v;
+            RebuildAnchorsIfReady();
+            Echo($"MH set to {MH:0.00} m");
+        }
+        else
+            Echo("Invalid SET_MH value.");
+        return;
+    }
+    if (trimmed.StartsWith("SET_OV ", StringComparison.OrdinalIgnoreCase))
+    {
+        double v;
+        if (double.TryParse(trimmed.Substring(7).Trim(), out v) && v >= 0)
+        {
+            OV = v;
+            RebuildAnchorsIfReady();
+            Echo($"OV set to {OV:0.00} m");
+        }
+        else
+            Echo("Invalid SET_OV value.");
+        return;
+    }
+    if (trimmed.StartsWith("SET_CORNERS ", StringComparison.OrdinalIgnoreCase))
+    {
+        ParseCornersCommand(trimmed.Substring(12).Trim());
         return;
     }
 
@@ -289,7 +354,15 @@ void StartSingleLaneMining(string command)
     }
 
     laneDepth = depth;
-    laneAnchor = hasTarget ? targetPosition : rc.GetPosition();
+    if (laneAnchors.Count > 0)
+    {
+        laneAnchorIndex = 0;
+        laneAnchor = laneAnchors[laneAnchorIndex];
+    }
+    else
+    {
+        laneAnchor = hasTarget ? targetPosition : rc.GetPosition();
+    }
 
     Vector3D fwd = desiredForward;
     if (fwd.LengthSquared() < 0.001)
@@ -340,11 +413,21 @@ void UpdateMiningState()
             if (IsAtTargetPosition(targetPosition))
             {
                 SetDrills(false);
-                miningEnabled = false;
-                miningState = MiningState.Idle;
-                autopilotEnabled = false;
-                activeMaxSpeed = 0;
-                Echo("Mining lane complete.");
+                if (laneAnchors.Count > 0 && laneAnchorIndex + 1 < laneAnchors.Count)
+                {
+                    laneAnchorIndex++;
+                    laneAnchor = laneAnchors[laneAnchorIndex];
+                    miningState = MiningState.EnterLane;
+                    Echo($"Moving to next anchor ({laneAnchorIndex + 1}/{laneAnchors.Count})");
+                }
+                else
+                {
+                    miningEnabled = false;
+                    miningState = MiningState.Idle;
+                    autopilotEnabled = false;
+                    activeMaxSpeed = 0;
+                    Echo("Mining lane complete.");
+                }
             }
             break;
     }
@@ -369,6 +452,152 @@ void SetDrills(bool enabled)
             continue;
         d.Enabled = enabled;
     }
+}
+
+void ParseCornersCommand(string payload)
+{
+    string[] parts = payload.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
+    if (parts.Length != 3)
+    {
+        Echo("Usage: SET_CORNERS <gpsA>,<gpsB>,<gpsStartSide>");
+        return;
+    }
+
+    Vector3D a, b, s;
+    if (!TryParseSingleGps(parts[0].Trim(), out a) ||
+        !TryParseSingleGps(parts[1].Trim(), out b) ||
+        !TryParseSingleGps(parts[2].Trim(), out s))
+    {
+        Echo("Failed to parse one or more GPS values.");
+        return;
+    }
+
+    cornerA = a;
+    cornerB = b;
+    startSide = s;
+    hasCornerA = hasCornerB = hasStartSide = true;
+    RebuildAnchorsIfReady();
+}
+
+bool TryParseSingleGps(string gpsText, out Vector3D gps)
+{
+    gps = Vector3D.Zero;
+    if (!gpsText.StartsWith("GPS:", StringComparison.OrdinalIgnoreCase))
+        return false;
+    string[] t = gpsText.Split(':');
+    if (t.Length < 5)
+        return false;
+    double x, y, z;
+    if (!double.TryParse(t[2], out x)) return false;
+    if (!double.TryParse(t[3], out y)) return false;
+    if (!double.TryParse(t[4], out z)) return false;
+    gps = new Vector3D(x, y, z);
+    return true;
+}
+
+void RebuildAnchorsIfReady()
+{
+    if (!hasCornerA || !hasCornerB || !hasStartSide)
+        return;
+    BuildAnchorPlan();
+}
+
+void BuildAnchorPlan()
+{
+    laneAnchors.Clear();
+    laneAnchorIndex = 0;
+
+    Vector3D center = (cornerA + cornerB) * 0.5;
+    Vector3D normal = center - startSide;
+    if (normal.LengthSquared() < 0.001)
+    {
+        Echo("StartSideGPS too close to plane center.");
+        return;
+    }
+    normal = Vector3D.Normalize(normal);
+
+    Vector3D downRef = RejectFromNormal(rc.WorldMatrix.Down, normal);
+    if (downRef.LengthSquared() < 0.001)
+        downRef = RejectFromNormal(rc.WorldMatrix.Forward, normal);
+    if (downRef.LengthSquared() < 0.001)
+    {
+        Echo("Could not infer plane basis.");
+        return;
+    }
+    Vector3D down = Vector3D.Normalize(downRef);
+    Vector3D right = Vector3D.Normalize(Vector3D.Cross(normal, down));
+    down = Vector3D.Normalize(Vector3D.Cross(right, normal));
+
+    Vector3D ab = cornerB - cornerA;
+    double width = Vector3D.Dot(ab, right);
+    double height = Vector3D.Dot(ab, down);
+    if (width < 0)
+    {
+        width = -width;
+        right = -right;
+    }
+    if (height < 0)
+    {
+        height = -height;
+        down = -down;
+    }
+
+    double halfW = MW * 0.5;
+    double halfH = MH * 0.5;
+    if (width < MW || height < MH)
+    {
+        Echo("Plane extents are smaller than miner dimensions.");
+        return;
+    }
+
+    double stepX = Math.Max(0.01, MW - OV);
+    double stepY = Math.Max(0.01, MH - OV);
+    List<double> xs = BuildAxisCenters(width, halfW, stepX);
+    List<double> ys = BuildAxisCenters(height, halfH, stepY);
+
+    for (int yi = 0; yi < ys.Count; yi++)
+    {
+        if (yi % 2 == 0)
+        {
+            for (int xi = 0; xi < xs.Count; xi++)
+                laneAnchors.Add(cornerA + right * xs[xi] + down * ys[yi]);
+        }
+        else
+        {
+            for (int xi = xs.Count - 1; xi >= 0; xi--)
+                laneAnchors.Add(cornerA + right * xs[xi] + down * ys[yi]);
+        }
+    }
+
+    Echo($"Anchor plan built. Total anchors: {laneAnchors.Count}");
+}
+
+Vector3D RejectFromNormal(Vector3D v, Vector3D normal)
+{
+    return v - Vector3D.Dot(v, normal) * normal;
+}
+
+List<double> BuildAxisCenters(double extent, double halfMiner, double step)
+{
+    List<double> values = new List<double>();
+    double minC = halfMiner;
+    double maxC = extent - halfMiner;
+    if (maxC < minC)
+    {
+        values.Add(extent * 0.5);
+        return values;
+    }
+
+    double c = minC;
+    values.Add(c);
+    while (c + step < maxC)
+    {
+        c += step;
+        values.Add(c);
+    }
+    if (values[values.Count - 1] < maxC)
+        values.Add(maxC); // border-hug final center
+    return values;
 }
 
 void DumpCurrentGpsToCustomData()
