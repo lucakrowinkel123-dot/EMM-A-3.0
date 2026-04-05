@@ -15,6 +15,8 @@
 // dumpgps : appends current GPS + orientation snapshot to Custom Data
 // minelane;depth : run one mining lane from anchor to depth and return
 // cancelmine : stops mining state machine and turns drills off
+// SPEEDF <value> : sets forward drilling speed (m/s)
+// SPEEDB <value> : sets backing-out speed (m/s)
 // =====================================
 
 Settings settings;
@@ -41,6 +43,9 @@ bool miningEnabled = false;
 Vector3D laneAnchor = Vector3D.Zero;
 Vector3D drillAxis = Vector3D.Zero;
 double laneDepth = 0;
+double SPEEDF = 1.0; // forward drilling speed (m/s)
+double SPEEDB = 6.0; // backing-out speed (m/s)
+double activeMaxSpeed = 0;
 
 readonly int echoFrequency = 100; // every 100th game tick
 int runtime = 0;
@@ -115,6 +120,8 @@ void WriteEcho()
     sb.AppendLine($"Arrival tolerance: {settings.arrivalTolerance.Value:0.00} m");
     sb.AppendLine($"Orientation tolerance: {settings.orientationToleranceDeg.Value:0.00} deg");
     sb.AppendLine($"Mining: {miningState}");
+    sb.AppendLine($"SPEEDF: {SPEEDF:0.00} m/s");
+    sb.AppendLine($"SPEEDB: {SPEEDB:0.00} m/s");
     sb.AppendLine("Faceforward = look toward target");
     sb.AppendLine("Faceup = align up to gravity-up (or current up in space)");
 
@@ -154,7 +161,8 @@ void Move ()
         return;
     }
 
-    thrust.ApplyAccel(thrust.ControlPosition(targetPosition, Vector3D.Zero, settings.maxSpeed.Value));
+    double maxSpeed = activeMaxSpeed > 0 ? activeMaxSpeed : settings.maxSpeed.Value;
+    thrust.ApplyAccel(thrust.ControlPosition(targetPosition, Vector3D.Zero, maxSpeed));
 }
 
 bool IsOrientationAligned(Vector3D forward, Vector3D up, double toleranceDeg)
@@ -197,6 +205,32 @@ void RemoteCommand (string command)
         return;
     }
 
+    if (trimmed.StartsWith("SPEEDF ", StringComparison.OrdinalIgnoreCase))
+    {
+        double v;
+        if (double.TryParse(trimmed.Substring(7).Trim(), out v) && v > 0)
+        {
+            SPEEDF = v;
+            Echo($"SPEEDF set to {SPEEDF:0.00} m/s");
+        }
+        else
+            Echo("Invalid SPEEDF value.");
+        return;
+    }
+
+    if (trimmed.StartsWith("SPEEDB ", StringComparison.OrdinalIgnoreCase))
+    {
+        double v;
+        if (double.TryParse(trimmed.Substring(7).Trim(), out v) && v > 0)
+        {
+            SPEEDB = v;
+            Echo($"SPEEDB set to {SPEEDB:0.00} m/s");
+        }
+        else
+            Echo("Invalid SPEEDB value.");
+        return;
+    }
+
     switch (trimmed.ToLower())
     {
         case "stop":
@@ -216,6 +250,7 @@ void RemoteCommand (string command)
             desiredUp = Vector3D.Zero;
             miningEnabled = false;
             miningState = MiningState.Idle;
+            activeMaxSpeed = 0;
             SetDrills(false);
             ResetMovement();
             WriteEcho();
@@ -226,6 +261,7 @@ void RemoteCommand (string command)
         case "cancelmine":
             miningEnabled = false;
             miningState = MiningState.Idle;
+            activeMaxSpeed = 0;
             SetDrills(false);
             Echo("Mining cancelled.");
             break;
@@ -268,6 +304,7 @@ void StartSingleLaneMining(string command)
 
     desiredForward = drillAxis;
     targetPosition = laneAnchor;
+    activeMaxSpeed = SPEEDB;
     hasTarget = true;
     autopilotEnabled = true;
     miningEnabled = true;
@@ -282,6 +319,7 @@ void UpdateMiningState()
         case MiningState.EnterLane:
             targetPosition = laneAnchor;
             desiredForward = drillAxis;
+            activeMaxSpeed = SPEEDB;
             if (IsAtTargetPose(targetPosition, desiredForward, desiredUp))
             {
                 SetDrills(true);
@@ -291,18 +329,21 @@ void UpdateMiningState()
         case MiningState.DrillForward:
             targetPosition = laneAnchor + drillAxis * laneDepth;
             desiredForward = drillAxis;
+            activeMaxSpeed = SPEEDF;
             if (IsAtTargetPosition(targetPosition))
                 miningState = MiningState.Backout;
             break;
         case MiningState.Backout:
             targetPosition = laneAnchor;
             desiredForward = drillAxis;
+            activeMaxSpeed = SPEEDB;
             if (IsAtTargetPosition(targetPosition))
             {
                 SetDrills(false);
                 miningEnabled = false;
                 miningState = MiningState.Idle;
                 autopilotEnabled = false;
+                activeMaxSpeed = 0;
                 Echo("Mining lane complete.");
             }
             break;
