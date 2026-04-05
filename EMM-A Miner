@@ -223,6 +223,8 @@ void RemoteCommand (string command)
         WriteEcho();
         return;
     }
+    return true;
+}
 
     if (upper.StartsWith("SPEEDF "))
     {
